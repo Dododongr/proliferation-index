@@ -1,0 +1,36 @@
+{
+    "s.genes": [
+        "ATAD2",
+        "BLM",
+        "MCM4",
+        "CLSPN",
+        "RRM2"
+    ],
+    "g2m.genes": [
+        "MKI67",
+        "TOP2A",
+        "CENPF",
+        "TPX2",
+        "CENPE",
+        "ANLN",
+        "SMC4",
+        "NUSAP1",
+        "CDC25C",
+        "KIF2C",
+        "KIF11",
+        "HMMR",
+        "KIF20B",
+        "TACC3",
+        "BUB1",
+        "DLGAP5",
+        "TMPO",
+        "NCAPD2",
+        "AURKA",
+        "GTSE1",
+        "NDC80",
+        "CDCA2",
+        "KIF23",
+        "CKAP5",
+        "CDK1"
+    ]
+}
