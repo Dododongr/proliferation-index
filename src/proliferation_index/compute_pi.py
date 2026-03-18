@@ -276,6 +276,10 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
 
         passing_genes = df_loo[df_loo["spearman_r"] >= r_thr]["gene"].tolist()
 
+    # r_thr=0 always means "use all present genes" regardless of NaN LOO values
+    if r_thr == 0.0:
+        passing_genes = present
+
     gene_to_col = {g: i for i, g in enumerate(present)}
     s_idx   = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(s_pool)]
     g2m_idx = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(g2m_pool)]
