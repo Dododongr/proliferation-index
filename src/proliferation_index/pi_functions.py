@@ -156,56 +156,82 @@ def detect_counts_source(h5ad_path: str | Path) -> tuple[str | None, str]:
     return layer, libsize_key
 
 
-def _read_h5ad_backed_safe(h5ad_path: str | Path):
+def _load_cc_counts_h5py(
+    h5ad_path: str | Path,
+    gene_list: list[str],
+    counts_layer: str | None,
+    libsize_obs_key: str,
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
     """
-    Open an h5ad file in backed='r' mode.
+    h5py-based fallback for load_cc_counts.
 
-    Some h5ad files contain uns keys (e.g. uns/log1p/base=None) that are
-    incompatible across anndata versions. This function automatically strips
-    those problematic uns keys in-memory via h5py and retries if the first
-    read fails.
+    Reads var_names, obs[libsize_obs_key], and the selected gene columns
+    directly from the HDF5 file without using anndata at all, avoiding all
+    anndata version compatibility issues.
 
-    Returns an open AnnData object in backed mode. Caller must close it.
+    For CSC matrices (most common), only the required gene columns are read
+    from disk (memory-efficient). For CSR, the full matrix is loaded.
     """
-    import anndata as ad
     import h5py
 
-    try:
-        return ad.read_h5ad(h5ad_path, backed="r")
-    except Exception as first_err:
-        # Check if the error is uns-related (common anndata version mismatch)
-        err_str = str(first_err) + type(first_err).__name__
-        if "uns" not in err_str and "IORegistry" not in err_str and "log1p" not in err_str:
-            raise  # unrelated error — re-raise as-is
+    with h5py.File(h5ad_path, "r") as f:
+        # ── var_names ──────────────────────────────────────────────────────
+        var_grp = f["var"]
+        idx_key = "_index" if "_index" in var_grp else "index"
+        var_names = [v.decode() if isinstance(v, bytes) else str(v)
+                     for v in var_grp[idx_key][:]]
 
-        print(
-            f"[WARN] anndata backed read failed due to uns compatibility issue.\n"
-            f"       Attempting auto-fix: stripping problematic uns keys...\n"
-            f"       (Original error: {first_err})"
-        )
+        var_idx      = {g: i for i, g in enumerate(var_names)}
+        present_genes = [g for g in gene_list if g in var_idx]
+        missing_genes = [g for g in gene_list if g not in var_idx]
+        col_indices   = [var_idx[g] for g in present_genes]
 
-        # Remove the problematic uns key directly in the file using h5py
-        with h5py.File(h5ad_path, "a") as f:
-            removed = []
-            if "uns" in f:
-                for key in list(f["uns"].keys()):
-                    try:
-                        # Try reading each uns key; remove if it fails
-                        f["uns"][key][()]
-                    except Exception:
-                        del f["uns"][key]
-                        removed.append(key)
-            if removed:
-                print(f"       Removed uns keys: {removed}")
+        # ── libsize ────────────────────────────────────────────────────────
+        libsize = np.array(f["obs"][libsize_obs_key][:], dtype=float)
+        n_cells = len(libsize)
 
-        # Retry after fix
-        try:
-            return ad.read_h5ad(h5ad_path, backed="r")
-        except Exception as second_err:
-            raise RuntimeError(
-                f"Could not open {h5ad_path} even after stripping problematic uns keys.\n"
-                f"Error: {second_err}"
-            ) from second_err
+        # ── counts matrix ──────────────────────────────────────────────────
+        if counts_layer is not None and "layers" in f and counts_layer in f["layers"]:
+            mat_grp = f["layers"][counts_layer]
+        elif "X" in f:
+            mat_grp = f["X"]
+        else:
+            raise ValueError(
+                f"Cannot find counts matrix. "
+                f"Tried: layers['{counts_layer}'], X"
+            )
+
+        enc = mat_grp.attrs.get("encoding-type", "")
+        if isinstance(enc, bytes):
+            enc = enc.decode()
+
+        n_present = len(present_genes)
+        counts_dense = np.zeros((n_cells, n_present), dtype=np.float32)
+
+        if "csc" in enc:
+            # CSC: read only the needed columns — memory efficient
+            data    = mat_grp["data"][:]
+            indices = mat_grp["indices"][:]
+            indptr  = mat_grp["indptr"][:]
+            for out_col, col_idx in enumerate(col_indices):
+                start, end = int(indptr[col_idx]), int(indptr[col_idx + 1])
+                if start < end:
+                    counts_dense[indices[start:end], out_col] = data[start:end]
+
+        elif "csr" in enc:
+            # CSR: load full sparse matrix then subset columns
+            data    = mat_grp["data"][:]
+            indices = mat_grp["indices"][:]
+            indptr  = mat_grp["indptr"][:]
+            shape   = tuple(mat_grp.attrs["shape"])
+            mat = sp.csr_matrix((data, indices, indptr), shape=shape)
+            counts_dense = mat[:, col_indices].toarray().astype(np.float32)
+
+        else:
+            # Dense fallback
+            counts_dense = np.array(mat_grp[:, col_indices], dtype=np.float32)
+
+    return counts_dense, libsize, present_genes, missing_genes
 
 
 def load_cc_counts(
@@ -217,11 +243,13 @@ def load_cc_counts(
     """
     Load raw-count expression for CC-gene subset from an h5ad file.
 
-    Uses backed='r' mode and CSC-efficient column subsetting so that only
-    ~100 gene columns are loaded into memory (not the full matrix).
+    Primary path: anndata backed='r' mode with CSC-efficient column
+    subsetting (only ~100 gene columns loaded into memory).
 
-    Automatically handles anndata version compatibility issues in uns
-    (e.g. uns/log1p/base=null encoding errors from Seurat-converted h5ad).
+    Fallback path: if anndata raises a version-compatibility error on uns
+    (common with Seurat-converted h5ad files, e.g. uns/log1p/base=None),
+    automatically switches to a pure h5py reader that reads only the
+    needed columns directly — no file modification required.
 
     Parameters
     ----------
@@ -241,7 +269,23 @@ def load_cc_counts(
     present_genes: list[str]  – genes from gene_list found in the dataset
     missing_genes: list[str]  – genes from gene_list absent in the dataset
     """
-    adata = _read_h5ad_backed_safe(h5ad_path)
+    import anndata as ad
+
+    # ── Primary: anndata backed mode ──────────────────────────────────────
+    try:
+        adata = ad.read_h5ad(h5ad_path, backed="r")
+    except Exception as e:
+        err_str = str(e) + type(e).__name__
+        if "IORegistry" not in err_str and "null" not in err_str and "log1p" not in err_str:
+            raise  # unrelated error
+        print(
+            f"[WARN] anndata backed read failed (uns compatibility issue).\n"
+            f"       Switching to h5py fallback — no file modification needed.\n"
+            f"       (Error: {e})"
+        )
+        return _load_cc_counts_h5py(h5ad_path, gene_list, counts_layer, libsize_obs_key)
+
+    # ── Normal anndata path ───────────────────────────────────────────────
     var_set = set(adata.var_names)
 
     present_genes = [g for g in gene_list if g in var_set]
