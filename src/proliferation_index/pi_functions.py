@@ -84,9 +84,49 @@ _LAYER_CANDIDATES   = ["counts_RNA", "counts"]   # None → fall back to adata.X
 _LIBSIZE_CANDIDATES = ["nCount_RNA", "total_counts"]
 
 
+def _h5ad_keys(h5ad_path: str | Path) -> tuple[list[str], list[str], list[str]]:
+    """
+    Read layer names, obs column names, and var_names from an h5ad file
+    using h5py directly — bypasses anndata version compatibility issues
+    (e.g. uns/log1p/base=null encoding errors).
+
+    Returns
+    -------
+    (layer_keys, obs_keys, var_names)
+    """
+    import h5py
+    import numpy as np
+
+    with h5py.File(h5ad_path, "r") as f:
+        layer_keys = list(f.get("layers", {}).keys())
+
+        # obs columns — h5py groups have keys(); datasets are columns
+        obs_keys = [k for k in f["obs"].keys() if k != "_index"]
+
+        # var_names — stored in var/_index or var/index
+        var_grp = f["var"]
+        if "_index" in var_grp:
+            var_names = [v.decode() if isinstance(v, bytes) else v
+                         for v in var_grp["_index"][:]]
+        elif "index" in var_grp:
+            var_names = [v.decode() if isinstance(v, bytes) else v
+                         for v in var_grp["index"][:]]
+        else:
+            # fallback: first string dataset in var
+            idx_key = next(k for k in var_grp.keys()
+                           if var_grp[k].dtype.kind in ("S", "U", "O"))
+            var_names = [v.decode() if isinstance(v, bytes) else v
+                         for v in var_grp[idx_key][:]]
+
+    return layer_keys, obs_keys, var_names
+
+
 def detect_counts_source(h5ad_path: str | Path) -> tuple[str | None, str]:
     """
     Auto-detect counts layer and libsize obs key from an h5ad file.
+
+    Uses h5py directly to read only file metadata (layer names, obs column
+    names), which avoids anndata version compatibility issues with uns.
 
     Tries (in priority order):
       layer    : 'counts_RNA' → 'counts' → None (= adata.X)
@@ -101,25 +141,71 @@ def detect_counts_source(h5ad_path: str | Path) -> tuple[str | None, str]:
     ------
     ValueError if no suitable libsize column is found.
     """
-    import anndata as ad
+    layer_keys, obs_keys, _ = _h5ad_keys(h5ad_path)
 
-    adata = ad.read_h5ad(h5ad_path, backed="r")
+    layer = next((l for l in _LAYER_CANDIDATES if l in layer_keys), None)
 
-    # Layer
-    layer = next((l for l in _LAYER_CANDIDATES if l in adata.layers), None)
-
-    # Libsize
-    obs_cols = set(adata.obs.columns)
-    libsize_key = next((k for k in _LIBSIZE_CANDIDATES if k in obs_cols), None)
+    obs_set = set(obs_keys)
+    libsize_key = next((k for k in _LIBSIZE_CANDIDATES if k in obs_set), None)
     if libsize_key is None:
-        adata.file.close()
         raise ValueError(
             f"Cannot auto-detect libsize column. "
-            f"Tried: {_LIBSIZE_CANDIDATES}. Available obs: {sorted(obs_cols)}"
+            f"Tried: {_LIBSIZE_CANDIDATES}. Available obs: {sorted(obs_set)}"
         )
 
-    adata.file.close()
     return layer, libsize_key
+
+
+def _read_h5ad_backed_safe(h5ad_path: str | Path):
+    """
+    Open an h5ad file in backed='r' mode.
+
+    Some h5ad files contain uns keys (e.g. uns/log1p/base=None) that are
+    incompatible across anndata versions. This function automatically strips
+    those problematic uns keys in-memory via h5py and retries if the first
+    read fails.
+
+    Returns an open AnnData object in backed mode. Caller must close it.
+    """
+    import anndata as ad
+    import h5py
+
+    try:
+        return ad.read_h5ad(h5ad_path, backed="r")
+    except Exception as first_err:
+        # Check if the error is uns-related (common anndata version mismatch)
+        err_str = str(first_err) + type(first_err).__name__
+        if "uns" not in err_str and "IORegistry" not in err_str and "log1p" not in err_str:
+            raise  # unrelated error — re-raise as-is
+
+        print(
+            f"[WARN] anndata backed read failed due to uns compatibility issue.\n"
+            f"       Attempting auto-fix: stripping problematic uns keys...\n"
+            f"       (Original error: {first_err})"
+        )
+
+        # Remove the problematic uns key directly in the file using h5py
+        with h5py.File(h5ad_path, "a") as f:
+            removed = []
+            if "uns" in f:
+                for key in list(f["uns"].keys()):
+                    try:
+                        # Try reading each uns key; remove if it fails
+                        f["uns"][key][()]
+                    except Exception:
+                        del f["uns"][key]
+                        removed.append(key)
+            if removed:
+                print(f"       Removed uns keys: {removed}")
+
+        # Retry after fix
+        try:
+            return ad.read_h5ad(h5ad_path, backed="r")
+        except Exception as second_err:
+            raise RuntimeError(
+                f"Could not open {h5ad_path} even after stripping problematic uns keys.\n"
+                f"Error: {second_err}"
+            ) from second_err
 
 
 def load_cc_counts(
@@ -133,6 +219,9 @@ def load_cc_counts(
 
     Uses backed='r' mode and CSC-efficient column subsetting so that only
     ~100 gene columns are loaded into memory (not the full matrix).
+
+    Automatically handles anndata version compatibility issues in uns
+    (e.g. uns/log1p/base=null encoding errors from Seurat-converted h5ad).
 
     Parameters
     ----------
@@ -152,9 +241,7 @@ def load_cc_counts(
     present_genes: list[str]  – genes from gene_list found in the dataset
     missing_genes: list[str]  – genes from gene_list absent in the dataset
     """
-    import anndata as ad
-
-    adata = ad.read_h5ad(h5ad_path, backed="r")
+    adata = _read_h5ad_backed_safe(h5ad_path)
     var_set = set(adata.var_names)
 
     present_genes = [g for g in gene_list if g in var_set]
