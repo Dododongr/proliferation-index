@@ -5,7 +5,7 @@ from .pi_functions import (
     detect_counts_source,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "compute_pi",
     "load_gene_dict",
