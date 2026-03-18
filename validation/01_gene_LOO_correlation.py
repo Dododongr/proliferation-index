@@ -40,8 +40,8 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
-from pi_functions import compute_pi, load_cc_counts, load_gene_dict
+sys.path.insert(0, str(ROOT / "src"))
+from proliferation_index.pi_functions import compute_pi, load_cc_counts, load_gene_dict
 
 DEFAULT_SCIPLEX = (Path("/mnt/lab-store/projects/ATOMIC/analysis/dong")
                    / "object/SciPlexGxE/sciplex3_atomicPI2.symbolVar.h5ad")
