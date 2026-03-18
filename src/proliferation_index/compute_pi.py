@@ -276,6 +276,7 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
 
         passing_genes = df_loo[df_loo["spearman_r"] >= r_thr]["gene"].tolist()
 
+    gene_to_col = {g: i for i, g in enumerate(present)}
     s_idx   = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(s_pool)]
     g2m_idx = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(g2m_pool)]
 
