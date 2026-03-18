@@ -8,8 +8,10 @@ ALGORITHM
 1. Load the 100-gene candidate pool (cc_genes_pool.json).
 2. Run Leave-One-Out (LOO) Spearman correlation on your data:
    for each gene g, compute PI without g, then correlate expr(g) vs LOO-PI.
-3. Show how many genes pass each r threshold (0.2 / 0.3 / 0.4 / 0.5).
+3. Show how many genes pass each r threshold (0 / 0.2 / 0.3 / 0.4 / 0.5).
 4. Ask you to select a threshold  (or pass --r-threshold to skip the prompt).
+   Use --r-threshold 0 to skip LOO entirely and use the full 100-gene pool
+   (recommended for post-mitotic / low-cycling tissues like brain).
 5. Compute PI with the passing genes.
 6. Save PI as 'proliferation_index' in adata.obs and write h5ad.
 
@@ -57,7 +59,7 @@ from .pi_functions import (
 
 # ─── Default paths ────────────────────────────────────────────────────────────
 DEFAULT_GENE_POOL = Path(__file__).parent / "gene_lists/cc_genes_pool.json"
-VALID_THRESHOLDS  = [0.2, 0.3, 0.4, 0.5]
+VALID_THRESHOLDS  = [0.0, 0.2, 0.3, 0.4, 0.5]
 OBS_KEY           = "proliferation_index"
 
 # Preset → (counts_layer, libsize_obs_key)
@@ -162,17 +164,24 @@ def print_threshold_table(df_loo, s_pool, g2m_pool):
     gene_to_phase = {g: "S" for g in s_pool}
     gene_to_phase.update({g: "G2M" for g in g2m_pool})
 
-    print(f"\n{'─'*52}")
-    print(f"  {'Threshold':>10}  {'Total':>6}  {'S genes':>8}  {'G2M genes':>10}")
-    print(f"{'─'*52}")
-    rows = []
-    for thr in VALID_THRESHOLDS:
+    all_genes = df_loo["gene"].tolist()
+    n_s_all   = sum(1 for g in all_genes if gene_to_phase.get(g) == "S")
+    n_g2m_all = sum(1 for g in all_genes if gene_to_phase.get(g) == "G2M")
+
+    print(f"\n{'─'*60}")
+    print(f"  {'Threshold':>12}  {'Total':>6}  {'S genes':>8}  {'G2M genes':>10}")
+    print(f"{'─'*60}")
+    print(f"  r ≥ 0 (pool)  {len(all_genes):>6}  {n_s_all:>8}  {n_g2m_all:>10}  ← no filter")
+    print(f"{'─'*60}")
+
+    rows = [{"threshold": 0.0, "n_total": len(all_genes), "n_S": n_s_all, "n_G2M": n_g2m_all}]
+    for thr in [t for t in VALID_THRESHOLDS if t > 0]:
         passing = df_loo[df_loo["spearman_r"] >= thr]["gene"].tolist()
         n_s   = sum(1 for g in passing if gene_to_phase.get(g) == "S")
         n_g2m = sum(1 for g in passing if gene_to_phase.get(g) == "G2M")
-        print(f"  r ≥ {thr:.1f}      {len(passing):>6}  {n_s:>8}  {n_g2m:>10}")
+        print(f"  r ≥ {thr:.1f}        {len(passing):>6}  {n_s:>8}  {n_g2m:>10}")
         rows.append({"threshold": thr, "n_total": len(passing), "n_S": n_s, "n_G2M": n_g2m})
-    print(f"{'─'*52}")
+    print(f"{'─'*60}")
     return pd.DataFrame(rows)
 
 
@@ -221,7 +230,7 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
     all_pool  = s_pool + g2m_pool
     logger.log(f"\nGene pool: {len(s_pool)} S + {len(g2m_pool)} G2M = {len(all_pool)} total")
 
-    # ── Phase 1: LOO in backed mode (low memory) ───────────────────────────────
+    # ── Phase 1: Load CC gene counts ──────────────────────────────────────────
     logger.log("\nPhase 1 – Loading CC gene counts (backed, low memory)...", mem=True)
     counts, libsize, present, missing = load_cc_counts(
         input_path, all_pool,
@@ -233,26 +242,39 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
         logger.log(f"  Genes absent from dataset: {missing}")
     logger.log(f"  Counts matrix: {counts.nbytes / 1e6:.0f} MB", mem=True)
 
-    logger.log(f"\nRunning LOO Spearman correlation ({len(present)} genes × {counts.shape[0]:,} cells)...")
-    df_loo = run_loo(counts, libsize, present, s_pool, g2m_pool)
-    logger.log("  LOO done.", mem=True)
-
-    # ── Threshold summary + selection ──────────────────────────────────────────
-    print_threshold_table(df_loo, s_pool, g2m_pool)
-
-    if args.r_threshold is not None:
-        if args.r_threshold not in VALID_THRESHOLDS:
-            logger.log(f"ERROR: --r-threshold must be one of {VALID_THRESHOLDS}")
-            sys.exit(1)
-        r_thr = args.r_threshold
-        logger.log(f"Using r threshold: {r_thr}  (--r-threshold)")
+    # ── r-threshold 0: skip LOO, use full pool ────────────────────────────────
+    if args.r_threshold == 0.0:
+        logger.log("\nSkipping LOO (--r-threshold 0): using full gene pool.")
+        r_thr         = 0.0
+        passing_genes = present
     else:
-        r_thr = ask_threshold()
-        logger.log(f"Using r threshold: {r_thr}  (interactive)")
+        # ── LOO correlation ───────────────────────────────────────────────────
+        logger.log(f"\nRunning LOO Spearman correlation ({len(present)} genes × {counts.shape[0]:,} cells)...")
+        df_loo = run_loo(counts, libsize, present, s_pool, g2m_pool)
+        logger.log("  LOO done.", mem=True)
 
-    # ── Phase 2: Compute PI with selected genes ────────────────────────────────
-    gene_to_col   = {g: i for i, g in enumerate(present)}
-    passing_genes = df_loo[df_loo["spearman_r"] >= r_thr]["gene"].tolist()
+        # ── Threshold summary + selection ─────────────────────────────────────
+        tbl = print_threshold_table(df_loo, s_pool, g2m_pool)
+
+        # Warn if all non-zero thresholds yield 0 genes (non-cycling tissue)
+        if tbl[tbl["threshold"] > 0]["n_total"].max() == 0:
+            logger.log(
+                "\n[HINT] All LOO thresholds yield 0 genes — this dataset likely has\n"
+                "       low cell-cycle activity (e.g. post-mitotic tissue).\n"
+                "       Use --r-threshold 0 to compute PI with the full 100-gene pool."
+            )
+
+        if args.r_threshold is not None:
+            if args.r_threshold not in VALID_THRESHOLDS:
+                logger.log(f"ERROR: --r-threshold must be one of {VALID_THRESHOLDS}")
+                sys.exit(1)
+            r_thr = args.r_threshold
+            logger.log(f"Using r threshold: {r_thr}  (--r-threshold)")
+        else:
+            r_thr = ask_threshold()
+            logger.log(f"Using r threshold: {r_thr}  (interactive)")
+
+        passing_genes = df_loo[df_loo["spearman_r"] >= r_thr]["gene"].tolist()
 
     s_idx   = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(s_pool)]
     g2m_idx = [gene_to_col[g] for g in passing_genes if g in gene_to_col and g in set(g2m_pool)]
