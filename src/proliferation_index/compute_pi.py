@@ -289,7 +289,21 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
     # ── Phase 3: Write PI back to h5ad ────────────────────────────────────────
     logger.log(f"\nPhase 3 – Loading full h5ad for write-back (peak RAM phase)...", mem=True)
     import anndata as ad
-    adata = ad.read_h5ad(input_path)
+    import h5py as _h5py
+    try:
+        adata = ad.read_h5ad(input_path)
+    except Exception as e:
+        err_str = str(e) + type(e).__name__
+        if "IORegistry" not in err_str and "null" not in err_str and "log1p" not in err_str:
+            raise
+        # Phase 1 backed file is closed — safe to open in write mode now.
+        # Strip the incompatible uns/log1p key (metadata only, no expression data).
+        logger.log("  [WARN] uns compatibility issue — stripping uns/log1p and retrying...")
+        with _h5py.File(input_path, "a") as _f:
+            if "uns" in _f and "log1p" in _f["uns"]:
+                del _f["uns"]["log1p"]
+                logger.log("  Removed uns/log1p from input file (one-time fix).")
+        adata = ad.read_h5ad(input_path)
     logger.log(f"  Full h5ad loaded.", mem=True)
 
     adata.obs[OBS_KEY] = pi_values
