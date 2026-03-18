@@ -96,11 +96,15 @@ def compute_pi_for_genelist(
     libsize: np.ndarray,
     present_genes: list[str],
     gene_dict: dict,
+    exclude: Optional[list] = None,
 ) -> np.ndarray:
-    """Compute PI given a counts matrix (pre-loaded for the 100-gene pool)."""
+    """Compute PI given a counts matrix (pre-loaded for the 100-gene pool).
+    exclude: list of gene names to omit from the calculation (e.g. [MKI67_GENE]).
+    """
+    excl = set(exclude) if exclude else set()
     gene_to_col = {g: i for i, g in enumerate(present_genes)}
-    s_idx   = [gene_to_col[g] for g in gene_dict["s.genes"]   if g in gene_to_col]
-    g2m_idx = [gene_to_col[g] for g in gene_dict["g2m.genes"] if g in gene_to_col]
+    s_idx   = [gene_to_col[g] for g in gene_dict["s.genes"]   if g in gene_to_col and g not in excl]
+    g2m_idx = [gene_to_col[g] for g in gene_dict["g2m.genes"] if g in gene_to_col and g not in excl]
     return compute_pi(counts, libsize, s_idx, g2m_idx)
 
 
@@ -154,7 +158,7 @@ def main():
     if pool_json.exists():
         configs.append(("pool_100", pool_json))
 
-    for thr_tag, label in [("r02", "r≥0.2"), ("r03", "r≥0.3"), ("r04", "r≥0.4")]:
+    for thr_tag, label in [("r02", "r≥0.2"), ("r03", "r≥0.3")]:
         p = gene_list_dir / f"cc_genes_{thr_tag}.json"
         if p.exists():
             configs.append((label, p))
@@ -226,10 +230,17 @@ def main():
         col_key = f"pi_{label.replace('≥','').replace('.','').replace(' ','')}"
         per_cell_scores[col_key] = pi_vals
 
+        # MKI67 correlation: compute PI without MKI67 to avoid circularity
+        # (MKI67 is in the gene pool, so including it inflates r artificially)
         mki67_r_sp = float("nan")
         if mki67_expr is not None:
-            mki67_stats = correlation_stats(pi_vals, mki67_expr)
+            pi_no_mki67 = compute_pi_for_genelist(
+                counts, libsize, present_genes, gd, exclude=[MKI67_GENE]
+            )
+            mki67_stats = correlation_stats(pi_no_mki67, mki67_expr)
             mki67_r_sp  = mki67_stats["spearman_r"]
+            col_key_nomki = f"pi_no_mki67_{label.replace('≥','').replace('.','').replace(' ','')}"
+            per_cell_scores[col_key_nomki] = pi_no_mki67
 
         line = (f"  {label:<10} {n_tot:>7}  {n_s:>5}  {n_g2m:>6}  "
                 f"{stats_all['spearman_r']:>10.4f}  {stats_all['pearson_r']:>9.4f}")
@@ -349,7 +360,7 @@ def main():
                 fig2, axes2 = plt.subplots(1, n_configs, figsize=(4 * n_configs, 4), squeeze=False)
 
                 for ax, (label, _), rec in zip(axes2[0], configs, summary_records):
-                    col_key = f"pi_{label.replace('≥','').replace('.','').replace(' ','')}"
+                    col_key = f"pi_no_mki67_{label.replace('≥','').replace('.','').replace(' ','')}"
                     pi_vals = per_cell_scores[col_key]
 
                     if celltypes is not None:
@@ -374,7 +385,7 @@ def main():
                     ax.set_xlabel("MKI67 expression (log-norm)", fontsize=8)
                     ax.set_ylabel("PI", fontsize=8)
 
-                fig2.suptitle(f"SciPlex3 MKI67 validation — PI vs MKI67 (canonical marker)\n"
+                fig2.suptitle(f"SciPlex3 MKI67 validation — PI (MKI67-excluded) vs MKI67\n"
                               f"(n={len(ref_pi):,} cells, plotted: {n_plot:,})",
                               fontsize=10, y=1.02)
                 fig2.tight_layout()
@@ -396,8 +407,8 @@ def main():
 
                 ax3.set_xlabel("Gene list", fontsize=10)
                 ax3.set_ylabel("Spearman r", fontsize=10)
-                ax3.set_title("PI correlation: monocle3 PI vs MKI67\n"
-                              "(MKI67 = canonical proliferation marker)", fontsize=10)
+                ax3.set_title("PI (MKI67-excluded) correlation: vs monocle3 PI vs MKI67\n"
+                              "(MKI67 excluded from PI to avoid circularity)", fontsize=10)
                 ax3.set_xticks(x)
                 ax3.set_xticklabels(labels_list)
                 ax3.legend(fontsize=9)
