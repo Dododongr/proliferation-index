@@ -306,3 +306,66 @@ def load_cc_counts(
 
     adata.file.close()
     return counts_dense, libsize, present_genes, missing_genes
+
+
+def write_pi_h5py(
+    input_path: str | Path,
+    output_path: str | Path,
+    pi_values: np.ndarray,
+    obs_key: str,
+    params_dict: dict,
+) -> None:
+    """Write PI column and params to h5ad via h5py when anndata full load fails.
+
+    Copies input → output, then appends obs/<obs_key> (float64 array) and
+    uns/proliferation_index_params (dict group) directly using h5py — no
+    anndata read required, so non-ASCII obs string columns are never touched.
+    """
+    import shutil
+    import h5py
+
+    shutil.copy2(str(input_path), str(output_path))
+
+    with h5py.File(str(output_path), "a") as f:
+        # ── obs/PI ────────────────────────────────────────────────────────
+        obs = f["obs"]
+        if obs_key in obs:
+            del obs[obs_key]
+        ds = obs.create_dataset(obs_key, data=pi_values.astype(np.float64))
+        ds.attrs["encoding-type"] = "array"
+        ds.attrs["encoding-version"] = "0.2.0"
+
+        # ── uns/proliferation_index_params ────────────────────────────────
+        uns = f.require_group("uns")
+        pkey = "proliferation_index_params"
+        if pkey in uns:
+            del uns[pkey]
+        pgrp = uns.require_group(pkey)
+        pgrp.attrs["encoding-type"] = "dict"
+        pgrp.attrs["encoding-version"] = "0.1.0"
+
+        str_dt = h5py.string_dtype(encoding="utf-8")
+
+        # scalar float
+        ds = pgrp.create_dataset("r_threshold", data=float(params_dict["r_threshold"]))
+        ds.attrs["encoding-type"] = "scalar"
+        ds.attrs["encoding-version"] = "0.2.0"
+
+        # scalar ints
+        for k in ("n_genes_S", "n_genes_G2M"):
+            ds = pgrp.create_dataset(k, data=int(params_dict[k]))
+            ds.attrs["encoding-type"] = "scalar"
+            ds.attrs["encoding-version"] = "0.2.0"
+
+        # scalar strings
+        for k in ("counts_layer", "libsize_key"):
+            ds = pgrp.create_dataset(k, data=str(params_dict[k]), dtype=str_dt)
+            ds.attrs["encoding-type"] = "scalar"
+            ds.attrs["encoding-version"] = "0.2.0"
+
+        # string arrays (gene lists)
+        for k in ("genes_S", "genes_G2M"):
+            gene_list = params_dict[k]
+            ds = pgrp.create_dataset(k, data=np.array(gene_list, dtype=object), dtype=str_dt)
+            ds.attrs["encoding-type"] = "array"
+            ds.attrs["encoding-version"] = "0.2.0"

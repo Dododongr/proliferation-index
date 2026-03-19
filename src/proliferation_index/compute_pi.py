@@ -55,6 +55,7 @@ from scipy.stats import spearmanr
 from .pi_functions import (
     HAS_PSUTIL, rss_mb,
     compute_pi, detect_counts_source, load_cc_counts, load_gene_dict,
+    write_pi_h5py,
 )
 
 # ─── Default paths ────────────────────────────────────────────────────────────
@@ -294,24 +295,8 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
     logger.log(f"\nPhase 3 – Loading full h5ad for write-back (peak RAM phase)...", mem=True)
     import anndata as ad
     import h5py as _h5py
-    try:
-        adata = ad.read_h5ad(input_path)
-    except Exception as e:
-        err_str = str(e) + type(e).__name__
-        if "IORegistry" not in err_str and "null" not in err_str and "log1p" not in err_str:
-            raise
-        # Phase 1 backed file is closed — safe to open in write mode now.
-        # Strip the incompatible uns/log1p key (metadata only, no expression data).
-        logger.log("  [WARN] uns compatibility issue — stripping uns/log1p and retrying...")
-        with _h5py.File(input_path, "a") as _f:
-            if "uns" in _f and "log1p" in _f["uns"]:
-                del _f["uns"]["log1p"]
-                logger.log("  Removed uns/log1p from input file (one-time fix).")
-        adata = ad.read_h5ad(input_path)
-    logger.log(f"  Full h5ad loaded.", mem=True)
 
-    adata.obs[OBS_KEY] = pi_values
-    adata.uns["proliferation_index_params"] = {
+    params_dict = {
         "r_threshold":  r_thr,
         "counts_layer": counts_layer,
         "libsize_key":  libsize_key,
@@ -320,8 +305,40 @@ def _run(args, input_path: Path, output_path: Path, logger: RunLogger):
         "genes_S":      [g for g in passing_genes if g in set(s_pool)],
         "genes_G2M":    [g for g in passing_genes if g in set(g2m_pool)],
     }
-    adata.write_h5ad(output_path)
-    logger.log(f"  Writing done.", mem=True)
+
+    _anndata_ok = False
+    try:
+        adata = ad.read_h5ad(input_path)
+        _anndata_ok = True
+    except Exception as e:
+        err_str = str(e) + type(e).__name__
+        is_uns_issue     = "IORegistry" in err_str or "null" in err_str or "log1p" in err_str
+        is_unicode_issue = isinstance(e, UnicodeDecodeError)
+        if not is_uns_issue and not is_unicode_issue:
+            raise
+        if is_uns_issue:
+            logger.log("  [WARN] uns compatibility issue — stripping uns/log1p and retrying...")
+            with _h5py.File(input_path, "a") as _f:
+                if "uns" in _f and "log1p" in _f["uns"]:
+                    del _f["uns"]["log1p"]
+                    logger.log("  Removed uns/log1p from input file (one-time fix).")
+            try:
+                adata = ad.read_h5ad(input_path)
+                _anndata_ok = True
+            except Exception:
+                pass  # fall through to h5py write
+        if not _anndata_ok:
+            reason = "UnicodeDecodeError in obs" if is_unicode_issue else "uns incompatibility"
+            logger.log(f"  [WARN] anndata full load failed ({reason}) — using h5py write-back.")
+            write_pi_h5py(input_path, output_path, pi_values, OBS_KEY, params_dict)
+            logger.log(f"  Writing done (h5py).", mem=True)
+
+    if _anndata_ok:
+        logger.log(f"  Full h5ad loaded.", mem=True)
+        adata.obs[OBS_KEY] = pi_values
+        adata.uns["proliferation_index_params"] = params_dict
+        adata.write_h5ad(output_path)
+        logger.log(f"  Writing done.", mem=True)
 
     logger.log(f"\nSaved → {output_path}")
     logger.log(f"  obs key: '{OBS_KEY}'")
