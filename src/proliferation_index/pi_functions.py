@@ -346,22 +346,16 @@ def write_pi_h5py(
 
         str_dt = h5py.string_dtype(encoding="utf-8")
 
-        # scalar float
-        ds = pgrp.create_dataset("r_threshold", data=float(params_dict["r_threshold"]))
-        ds.attrs["encoding-type"] = "scalar"
-        ds.attrs["encoding-version"] = "0.2.0"
+        # scalar float — no encoding attrs: anndata reads as raw numpy scalar (all versions)
+        pgrp.create_dataset("r_threshold", data=float(params_dict["r_threshold"]))
 
         # scalar ints
         for k in ("n_genes_S", "n_genes_G2M"):
-            ds = pgrp.create_dataset(k, data=int(params_dict[k]))
-            ds.attrs["encoding-type"] = "scalar"
-            ds.attrs["encoding-version"] = "0.2.0"
+            pgrp.create_dataset(k, data=int(params_dict[k]))
 
         # scalar strings
         for k in ("counts_layer", "libsize_key"):
-            ds = pgrp.create_dataset(k, data=str(params_dict[k]), dtype=str_dt)
-            ds.attrs["encoding-type"] = "scalar"
-            ds.attrs["encoding-version"] = "0.2.0"
+            pgrp.create_dataset(k, data=str(params_dict[k]), dtype=str_dt)
 
         # string arrays (gene lists)
         for k in ("genes_S", "genes_G2M"):
