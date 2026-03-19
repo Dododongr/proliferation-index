@@ -276,10 +276,13 @@ def load_cc_counts(
         adata = ad.read_h5ad(h5ad_path, backed="r")
     except Exception as e:
         err_str = str(e) + type(e).__name__
-        if "IORegistry" not in err_str and "null" not in err_str and "log1p" not in err_str:
+        is_uns_issue = "IORegistry" in err_str or "null" in err_str or "log1p" in err_str
+        is_unicode_issue = isinstance(e, UnicodeDecodeError)
+        if not is_uns_issue and not is_unicode_issue:
             raise  # unrelated error
+        reason = "uns compatibility issue" if is_uns_issue else "UnicodeDecodeError in obs (non-ASCII cell labels)"
         print(
-            f"[WARN] anndata backed read failed (uns compatibility issue).\n"
+            f"[WARN] anndata backed read failed ({reason}).\n"
             f"       Switching to h5py fallback — no file modification needed.\n"
             f"       (Error: {e})"
         )
